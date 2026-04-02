@@ -1,6 +1,8 @@
 # SIMS-Academic-Progress-Report-Sender
 A Windows tool for sending SIMS academic progress reports in bulk directly to parent emails via any domain joined mailbox. Authenticates via MSAL and sends personalised emails with attached reports through the Microsoft Graph API.
 
+This exists because bulk report distribution isn't a standard feature in SIMS without a significant price tag. I was asked to put it together to save the office from manually mailing each report individually. 
+
 **Features:**
 - Test dry run with a log of where emails would be sent
 - Filename based matching system with duplicate email detection, one per unique email address
@@ -18,6 +20,8 @@ You'll need to access the Microsoft Entra Admin Panel and register a new app. No
 Next, give the application the **Mail.Send.Shared delegated permission** and grant admin consent.
 
 On Microsoft 365 Admin Center, give the user (e.g. user1@domainemail.com) **Send As** permissions for the mailbox you'd like to send from (e.g. sharedmailbox1@domainemail.com).
+
+**Note that if your school uses a service such as LGFL for your shared mailboxes you will need to grant the user permissions in their web portal also.**
 
 You will then need to create a report on SIMS containing the following columns in this exact order:
 Student Firstname, Student Lastname, Primary Email, Home Email, Work Email
