@@ -3,7 +3,7 @@ A Windows tool for sending SIMS academic progress reports in bulk directly to pa
 
 This exists because bulk report distribution isn't a standard feature in SIMS without a significant price tag. I was asked to put it together to save the office from manually mailing each report individually. 
 
-<img src="student report sender.png" width="800"/>
+<img src="Student Report Sender.png" width="800"/>
 
 **Features:**
 - Test dry run with a log of where emails would be sent
