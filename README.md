@@ -10,7 +10,8 @@ This exists because bulk report distribution isn't a standard feature in SIMS wi
 - Filename based matching system with duplicate email detection, one per unique email address
 - Customisation of email subject and body
 - Execution log
-- Send log local to reports folder to prevent duplicate emails
+- Send log local to the reports folder that tracks each report per recipient address, so nothing is sent twice. It is hashed, so it holds no student names or email addresses in plain text
+- Automatic retries when Microsoft is busy (throttled or briefly unavailable), with timeouts so a dropped connection can't hang the tool
 - App config to save details
 
 **Setup**
@@ -42,4 +43,6 @@ It is recommended to replace all parent email addresses in your CSV with your ow
 
 Run the tool with **Enable Dry Run** checked first. It will show you which files it has processed, whether a match was found in the CSV, and where the email would have been sent and from which account.
 
-When you are satisfied, uncheck dry run and run the tool. It will ask you to login to your Microsoft account. Use the user account with permissions 'user1@domainemail.com'. If successful, **it will send the emails**. As soon as at least one email sends successfully the send log will be updated. Running the tool again will not resend emails already in the log. You can continue adding reports to the same folder and re-running the tool, clearing the sent log when the previous reporting cycle has ended.
+When you are satisfied, uncheck dry run and run the tool. It will ask you to login to your Microsoft account. Use the user account with permissions 'user1@domainemail.com'. If successful, **it will send the emails**. Each email is recorded in the send log the moment it sends successfully, per recipient address. If the tool crashes, or one address fails, re-running it only sends the emails that haven't gone out yet. You can continue adding reports to the same folder and re-running the tool, clearing the sent log when the previous reporting cycle has ended.
+
+If a send fails because the connection drops part-way, the tool can't know whether that email was delivered. It is not retried or logged, and the log shows a warning. Check the sending mailbox's Sent Items before re-running. Send logs from v1.01 and earlier (which recorded filenames only) are still honoured.

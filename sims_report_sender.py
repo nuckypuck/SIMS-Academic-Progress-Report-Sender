@@ -5,6 +5,8 @@ import base64
 import requests
 import json
 import sys
+import time
+import hashlib
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
@@ -15,6 +17,12 @@ import msal
 # ==========================================
 
 SCOPES = ['https://graph.microsoft.com/Mail.Send.Shared']
+
+# Network behaviour for sending: (connect timeout, read timeout) in seconds,
+# and how many times to try when Graph says "slow down" (429) or is unavailable (503).
+REQUEST_TIMEOUT = (10, 120)
+MAX_ATTEMPTS = 3
+MAX_RETRY_WAIT = 60
 
 # Locate the user's AppData directory to prevent Permission Denied errors
 appdata_dir = os.getenv('APPDATA')
@@ -63,9 +71,19 @@ def load_sent_log(log_file):
             return set()
     return set()
 
+def sent_log_key(filename, email_address):
+    # One log entry per report per recipient address. It is hashed so the log
+    # file holds no student names or email addresses in plain text.
+    raw = f"{filename}|{email_address.strip().lower()}"
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
 def save_sent_log(log_set, log_file):
-    with open(log_file, 'w') as file:
-        json.dump(list(log_set), file, indent=4)
+    # Write to a temporary file and swap it in, so a crash part-way through
+    # writing can never leave a corrupted log behind.
+    temp_file = log_file + '.tmp'
+    with open(temp_file, 'w') as file:
+        json.dump(sorted(log_set), file, indent=4)
+    os.replace(temp_file, log_file)
 
 def clear_sent_log(log_file):
     with open(log_file, 'w') as file:
@@ -154,17 +172,42 @@ def send_graph_email(access_token, sender_email, parent_email, subject, body, fi
         "saveToSentItems": "true"
     }
 
-    try:
-        response = requests.post(url, headers=headers, json=email_payload)
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = requests.post(url, headers=headers, json=email_payload, timeout=REQUEST_TIMEOUT)
+        except requests.exceptions.ConnectTimeout:
+            # The connection was never made, so nothing was sent: safe to retry.
+            if attempt < MAX_ATTEMPTS:
+                wait = min(2 ** attempt, MAX_RETRY_WAIT)
+                print(f"  -> CONNECTION TIMEOUT sending to {parent_email}. Retrying in {wait}s (attempt {attempt} of {MAX_ATTEMPTS})...")
+                time.sleep(wait)
+                continue
+            print(f"  -> NETWORK ERROR sending to {parent_email}: could not connect after {MAX_ATTEMPTS} attempts.")
+            return False
+        except requests.exceptions.RequestException as e:
+            # The request may or may not have reached Microsoft before this failed,
+            # so it is NOT retried (a retry could send a duplicate) and NOT logged as sent.
+            print(f"  -> NETWORK ERROR sending to {parent_email}: {e}")
+            print(f"  -> WARNING: Unknown whether this email was delivered. Check the mailbox's Sent Items before re-running.")
+            return False
+
         if response.status_code == 202:
             print(f"  -> SUCCESS: Sent {attachment_name} to {parent_email}")
             return True
-        else:
-            print(f"  -> API ERROR sending to {parent_email}: {response.text}")
-            return False
-    except requests.exceptions.RequestException as e:
-        print(f"  -> NETWORK ERROR sending to {parent_email}: {e}")
+
+        if response.status_code in (429, 503) and attempt < MAX_ATTEMPTS:
+            # Microsoft rejected the request without processing it: safe to retry.
+            try:
+                wait = min(int(response.headers.get('Retry-After', '')), MAX_RETRY_WAIT)
+            except ValueError:
+                wait = min(2 ** attempt, MAX_RETRY_WAIT)
+            print(f"  -> API BUSY ({response.status_code}) sending to {parent_email}. Retrying in {wait}s (attempt {attempt} of {MAX_ATTEMPTS})...")
+            time.sleep(wait)
+            continue
+
+        print(f"  -> API ERROR sending to {parent_email}: {response.text}")
         return False
+    return False
 
 # ==========================================
 # --- GUI & THREADING LOGIC ---
@@ -330,6 +373,10 @@ class ReportSenderApp:
             self.status_text.set("Log cleared.")
 
     def toggle_buttons(self, state):
+        # Safe to call from the worker thread: the change itself runs on the Tk thread.
+        self.root.after(0, self._apply_button_state, state)
+
+    def _apply_button_state(self, state):
         if state == tk.DISABLED:
             self.btn_confirm.state(['disabled'])
             self.btn_refresh.state(['disabled'])
@@ -357,23 +404,33 @@ class ReportSenderApp:
         }
         save_app_config(self.config_data)
 
+        # Read every Tk value here, on the main thread, and hand the worker plain values.
+        settings = {
+            "csv_file": self.csv_path.get(),
+            "rep_folder": self.reports_path.get(),
+            "log_file": self.get_sent_log_path(),
+            "dry_run": self.is_dry_run.get(),
+            **self.config_data
+        }
+
         self.toggle_buttons(tk.DISABLED)
-        threading.Thread(target=self.execute_sending_logic, daemon=True).start()
+        threading.Thread(target=self.execute_sending_logic, args=(settings,), daemon=True).start()
 
     def update_status(self, text):
-        self.status_text.set(text)
+        # Safe to call from the worker thread: the change itself runs on the Tk thread.
+        self.root.after(0, self.status_text.set, text)
 
-    def execute_sending_logic(self):
-        csv_file = self.csv_path.get()
-        rep_folder = self.reports_path.get()
-        log_file = self.get_sent_log_path()
-        current_dry_run = self.is_dry_run.get()
-        
-        t_id = self.config_data["tenant_id"]
-        c_id = self.config_data["client_id"]
-        sender = self.config_data["sender_email"]
-        subject_template = self.config_data["subject"]
-        body_content = self.config_data["body"]
+    def execute_sending_logic(self, settings):
+        csv_file = settings["csv_file"]
+        rep_folder = settings["rep_folder"]
+        log_file = settings["log_file"]
+        current_dry_run = settings["dry_run"]
+
+        t_id = settings["tenant_id"]
+        c_id = settings["client_id"]
+        sender = settings["sender_email"]
+        subject_template = settings["subject"]
+        body_content = settings["body"]
 
         self.update_status("Starting process...")
         print(f"\n--- STARTING PROCESS (DRY RUN = {current_dry_run}) ---")
@@ -445,19 +502,24 @@ class ReportSenderApp:
             formatted_subject = subject_template.replace("{name}", display_name)
             
             print(f"  -> Match Confirmed: '{display_name}'")
-            transmission_success = False
+            # Reports sent by v1.01 or earlier were logged by filename only; those are still honoured above.
 
             for email_address in target_emails:
+                log_key = sent_log_key(filename, email_address)
+                if log_key in sent_log:
+                    print(f"  -> LOGGED: Already sent to {email_address}. Skipping.")
+                    continue
                 if current_dry_run:
                     print(f"  -> [DRY RUN] Would send '{attachment_name}' to: {email_address} (From: {sender})")
                 else:
                     print(f"  -> [SENDING] Transmitting '{attachment_name}' to: {email_address}...")
                     success = send_graph_email(access_token, sender, email_address, formatted_subject, body_content, filepath, attachment_name, mime_type)
-                    if success: transmission_success = True
+                    if success:
+                        sent_log.add(log_key)
+                        save_sent_log(sent_log, log_file)
             
-            if not current_dry_run and transmission_success:
-                sent_log.add(filename)
-                save_sent_log(sent_log, log_file)
+            # (Each address is logged the moment it is sent, above, so a crash or a failed
+            # address can never cause emails that already went out to be sent twice.)
             
         print("\n--- PROCESS COMPLETE ---")
         self.update_status("Process complete.")
